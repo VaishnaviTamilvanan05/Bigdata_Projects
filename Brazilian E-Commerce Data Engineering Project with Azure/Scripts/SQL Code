@@ -1,0 +1,85 @@
+-- Azure Synapse Analytics SQL Script
+
+CREATE SCHEMA gold;
+
+DROP VIEW IF EXISTS gold.final;
+
+CREATE VIEW gold.final AS
+SELECT
+    -- Include all existing columns from silver layer
+    *,
+    
+    -- Derived columns for gold layer
+
+    -- Time-based
+    FORMAT(order_purchase_timestamp, 'yyyy-MM') AS order_month,
+    FORMAT(order_delivered_customer_date, 'yyyy-MM') AS delivery_month,
+    DATENAME(weekday, order_delivered_customer_date) AS delivery_day_of_week,
+
+    -- Delivery status based on Delay Time
+    CASE 
+        WHEN [Delay Time] < 0 THEN 'Early'
+        WHEN [Delay Time] = 0 THEN 'On Time'
+        ELSE 'Late'
+    END AS delivery_status,
+
+    CASE 
+        WHEN actual_delivery_time <= 3 THEN 'Fast'
+        WHEN actual_delivery_time <= 7 THEN 'Normal'
+        ELSE 'Slow'
+    END AS delivery_speed_category,
+
+    -- Product metrics
+    product_length_cm * product_width_cm * product_height_cm AS product_volume_cm3,
+    product_weight_g / NULLIF(product_length_cm * product_width_cm * product_height_cm, 0) AS product_density,
+
+    -- Payment insights
+    CASE 
+        WHEN payment_installments > 0 THEN payment_value / payment_installments
+        ELSE NULL
+    END AS avg_payment_per_installment,
+
+    -- Freight insights
+    freight_value / NULLIF(price, 0) AS freight_ratio,
+
+    -- Customer insights
+    COUNT(order_item_id) OVER (PARTITION BY customer_unique_id) AS customer_order_count,
+
+    -- Category-level revenue contribution
+    SUM(payment_value) OVER (PARTITION BY product_category_name_english) * 1.0 / 
+    NULLIF(SUM(payment_value) OVER (), 0) AS category_revenue_contribution
+
+FROM
+    OPENROWSET(
+        BULK 'https://olistdatastorageaccbz.blob.core.windows.net/olistdata/silver/',
+        FORMAT = 'PARQUET'
+    ) AS result;
+
+
+
+
+
+-- CREATE MASTER KEY ENCRYPTION BY PASSWORD = '';
+-- CREATE DATABASE SCOPED CREDENTIAL olistadmin WITH IDENTITY = 'Managed Identity';
+
+-- select * from sys.database_credentials
+
+CREATE EXTERNAL FILE FORMAT extfileformat WITH (
+    FORMAT_TYPE = PARQUET,
+    DATA_COMPRESSION = 'org.apache.hadoop.io.compress.SnappyCodec'
+);
+
+CREATE EXTERNAL DATA SOURCE goldlayer WITH (
+    LOCATION = 'https://olistdatastorageaccount.dfs.core.windows.net/olistdata/gold/',
+    CREDENTIAL = mayankadmin
+);
+
+
+CREATE EXTERNAL TABLE gold.finaltable WITH (
+        LOCATION = 'Serving',
+        DATA_SOURCE = goldlayer,
+        FILE_FORMAT = extfileformat
+) AS
+SELECT * FROM gold.final;
+
+select * from gold.finaltable
